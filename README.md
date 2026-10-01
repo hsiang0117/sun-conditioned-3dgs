@@ -1,3 +1,13 @@
+# Sun-conditioned 3DGS research baseline
+
+This independent research repository preserves the main-branch history of [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) via the validated [local baseline fork](https://github.com/hsiang0117/gaussian-splatting), starting at `82c24968dda8933575019189eec5fcd568d638a8`. The existing upstream license and attribution remain in effect.
+
+Current status: repository preparation and design only; sun conditioning is not implemented yet. See [the implementation plan](SUN_CONDITIONED_PLAN.md) for the proposed conditional SH model, data split, integration points, and validation steps.
+
+The original project README follows.
+
+---
+
 # 3D Gaussian Splatting for Real-Time Radiance Field Rendering
 Bernhard Kerbl*, Georgios Kopanas*, Thomas Leimkühler, George Drettakis (* indicates equal contribution)<br>
 | [Webpage](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) | [Full Paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/3d_gaussian_splatting_high.pdf) | [Video](https://youtu.be/T_kXY43VZnk) | [Other GRAPHDECO Publications](http://www-sop.inria.fr/reves/publis/gdindex.php) | [FUNGRAPH project page](https://fungraph.inria.fr) |<br>
