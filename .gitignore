@@ -7,4 +7,7 @@ diff_rasterization/dist
 tensorboard_3d
 screenshots
 .venv/
+dependency-cache/
+environment-backups/
+temporary-build/
 .idea/

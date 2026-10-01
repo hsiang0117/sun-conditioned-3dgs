@@ -10,6 +10,10 @@
 #
 
 import os
+import json
+import math
+import time
+import torchvision
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -40,19 +44,48 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, preview_interval=1000):
+
+    if not dataset.disable_sun_conditioning and not dataset.eval:
+        raise ValueError("Sun-conditioned experiments require --eval to keep held-out frames out of training")
+    if not dataset.disable_sun_conditioning and dataset.train_test_exp:
+        raise ValueError("Disable per-image exposure fitting for sun-conditioned experiments")
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    gaussians = GaussianModel.from_args(dataset, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, map_location="cuda", weights_only=False)
         gaussians.restore(model_params, opt)
+        if gaussians.sun_conditioning != (not dataset.disable_sun_conditioning):
+            raise ValueError("Checkpoint conditioning mode differs from the command line; "
+                             "use --disable_sun_conditioning for an original-3DGS checkpoint")
+        if gaussians.sun_conditioning:
+            for name in ("sun_feature_dim", "sun_hidden_dim", "sun_sh_degree"):
+                setattr(dataset, name, getattr(gaussians, name))
+        # Record the decoder architecture actually restored from the checkpoint.
+        with open(os.path.join(dataset.model_path, "cfg_args"), "w") as stream:
+            stream.write(str(Namespace(**vars(dataset))))
+
+    with open(os.path.join(dataset.model_path, "training_config.json"), "w") as stream:
+        json.dump({"model": vars(dataset), "optimization": vars(opt),
+                   "pipeline": vars(pipe), "preview_interval": preview_interval}, stream, indent=2)
+    preview_camera = min(scene.getTrainCameras(), key=lambda camera: camera.image_name)
+    if preview_interval > 0:
+        preview_path = os.path.join(dataset.model_path, "rendertest")
+        os.makedirs(preview_path, exist_ok=True)
+        torchvision.utils.save_image(preview_camera.original_image, os.path.join(preview_path, "gt.png"))
+        with open(os.path.join(preview_path, "camera.json"), "w") as stream:
+            json.dump({"file_path": preview_camera.image_name,
+                       "camera_index": preview_camera.camera_index,
+                       "time_index": preview_camera.time_index,
+                       "sun_direction": preview_camera.v_l.cpu().tolist() if preview_camera.v_l is not None else None},
+                      stream, indent=2)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -69,6 +102,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_Ll1depth_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    started = time.perf_counter()
+    starting_iteration = first_iter
+    torch.cuda.reset_peak_memory_stats()
+    stats_stream = open(os.path.join(dataset.model_path, "training_stats.jsonl"), "a", buffering=1)
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
@@ -78,6 +115,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 net_image_bytes = None
                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
                 if custom_cam != None:
+                    # The upstream viewer protocol has no sun controls.
+                    custom_cam.v_l = preview_camera.v_l
                     net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                 network_gui.send(net_image_bytes, dataset.source_path)
@@ -146,6 +185,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if not math.isfinite(ema_loss_for_log):
+                raise FloatingPointError(f"Non-finite loss at iteration {iteration}")
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
@@ -156,9 +197,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -184,10 +222,39 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                if gaussians.sun_optimizer is not None:
+                    gaussians.sun_optimizer.step()
+                    gaussians.sun_optimizer.zero_grad(set_to_none=True)
+
+            if iteration % 10 == 0 or iteration == opt.iterations:
+                stats_stream.write(json.dumps({"iteration": iteration, "loss_ema": ema_loss_for_log,
+                                               "points": gaussians.get_xyz.shape[0],
+                                               "elapsed_seconds": time.perf_counter() - started}) + "\n")
+
+            if preview_interval > 0 and (iteration % preview_interval == 0 or iteration == opt.iterations):
+                preview = render(preview_camera, gaussians, pipe, background,
+                                 separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
+                torchvision.utils.save_image(preview, os.path.join(preview_path, f"iteration_{iteration:06d}.png"))
+
+            if iteration in saving_iterations:
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+    stats_stream.close()
+    torch.cuda.synchronize()
+    with open(os.path.join(dataset.model_path, "training_summary.json"), "w") as stream:
+        json.dump({"starting_iteration": starting_iteration, "iterations": opt.iterations,
+                   "elapsed_seconds_including_previews_and_evaluation": time.perf_counter() - started,
+                   "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+                   "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+                   "points": gaussians.get_xyz.shape[0], "sun_conditioning": gaussians.sun_conditioning},
+                  stream, indent=2)
+    if tb_writer is not None:
+        tb_writer.close()
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -263,19 +330,20 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--preview_interval", type=int, default=1000)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
-    safe_state(args.quiet)
+    safe_state(args.quiet, seed=args.seed)
 
     # Start GUI server, configure and run training
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.preview_interval)
 
     # All done
     print("\nTraining complete.")

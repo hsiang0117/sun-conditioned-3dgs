@@ -14,13 +14,15 @@ from torch import nn
 import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 from utils.general_utils import PILtoTorch
+from utils.light_utils import normalized_sun_direction
 import cv2
 
 class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image, invdepthmap,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 train_test_exp = False, is_test_dataset = False, is_test_view = False
+                 train_test_exp = False, is_test_dataset = False, is_test_view = False,
+                 sun_direction=None, camera_index=None, time_index=None
                  ):
         super(Camera, self).__init__()
 
@@ -31,6 +33,11 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.camera_index = camera_index
+        self.time_index = time_index
+        self.v_l = (torch.as_tensor(normalized_sun_direction(sun_direction),
+                                    device="cuda", dtype=torch.float32)
+                    if sun_direction is not None else None)
 
         try:
             self.data_device = torch.device(data_device)

@@ -12,6 +12,7 @@
 import torch
 from scene import Scene
 import os
+import json
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
@@ -34,20 +35,26 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
 
+    manifest = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
         gt = view.original_image[0:3, :, :]
 
-        if args.train_test_exp:
+        if train_test_exp:
             rendering = rendering[..., rendering.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
 
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        manifest.append({"image": f"{idx:05d}.png", "file_path": view.image_name,
+                         "camera_index": view.camera_index, "time_index": view.time_index,
+                         "sun_direction": view.v_l.cpu().tolist() if view.v_l is not None else None})
+    with open(os.path.join(os.path.dirname(render_path), "manifest.json"), "w") as stream:
+        json.dump(manifest, stream, indent=2)
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
+        gaussians = GaussianModel.from_args(dataset)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
@@ -72,6 +79,6 @@ if __name__ == "__main__":
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
-    safe_state(args.quiet)
+    safe_state(args.quiet, seed=getattr(args, "seed", 0))
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, SPARSE_ADAM_AVAILABLE)

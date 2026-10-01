@@ -1,29 +1,12 @@
-# gaussian-splatting (official, graphdeco-inria) — Python dependencies (Python 3.12, CUDA 12.8).
-# Install:  pip install -r requirements.txt
-#
-# torch/vision are the CUDA 12.8 wheels from the PyTorch index (PyPI only has CPU
-# builds). The three submodules are local CUDA extensions and must be compiled
-# against the installed torch — reinstall them after changing torch.
-#
-# ⚠️ Use a SEPARATE virtual environment for this repo, NOT the 3DGS-Volume-Cloud
-# .venv: both projects install a package named `diff_gaussian_rasterization`, and
-# installing the official one over the Cloud-GS fork breaks its custom API
-# (tau_precomp / record_front_tau / lightpass backward).
+# sun-conditioned-3dgs: Python 3.12 and CUDA 12.8.
+# On Windows install runtime/build requirements first, then use the audited
+# tools/build_cuda_extensions.ps1 workflow in WINDOWS_SETUP.md.
+# Keep a dedicated .venv: the rasterizer package name is shared with Cloud-GS.
 
---extra-index-url https://download.pytorch.org/whl/cu128
-torch==2.11.0+cu128
-torchvision==0.26.0+cu128
-
-numpy==2.5.2
-pillow==12.3.0
-opencv-python==4.13.0.92
-plyfile==1.1.3
-tqdm==4.67.3
-scipy==1.17.1          # required by lpips
-lpips==0.1.4           # LPIPS metric — same package + vgg backbone as Cloud-GS (unified protocol)
+-r requirements-runtime.txt
 
 # Local CUDA extensions (official rasterizer dr_aa branch + kNN + fused SSIM).
-# Need a CUDA toolchain to build; see the official README.
+# These must be rebuilt against the installed torch after changing torch.
 ./submodules/diff-gaussian-rasterization
 ./submodules/simple-knn
 ./submodules/fused-ssim

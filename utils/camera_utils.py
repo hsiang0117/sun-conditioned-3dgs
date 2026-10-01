@@ -18,6 +18,9 @@ import cv2
 WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
+    if not getattr(args, "disable_sun_conditioning", False) and cam_info.sun_direction is None:
+        raise ValueError(f"Missing sun_direction in {cam_info.image_path}; "
+                         "use --disable_sun_conditioning for an original-3DGS control")
     image = Image.open(cam_info.image_path)
 
     if cam_info.depth_path != "":
@@ -64,7 +67,9 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
+                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test,
+                  sun_direction=cam_info.sun_direction, camera_index=cam_info.camera_index,
+                  time_index=cam_info.time_index)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
     camera_list = []
@@ -94,4 +99,9 @@ def camera_to_JSON(id, camera : Camera):
         'fy' : fov2focal(camera.FovY, camera.height),
         'fx' : fov2focal(camera.FovX, camera.width)
     }
+    direction = getattr(camera, "sun_direction", None)
+    if direction is not None:
+        camera_entry["sun_direction"] = np.asarray(direction).tolist()
+        camera_entry["camera_index"] = camera.camera_index
+        camera_entry["time_index"] = camera.time_index
     return camera_entry

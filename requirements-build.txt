@@ -1,0 +1,4 @@
+# Build frontend versions used for the local CUDA extensions.
+setuptools==81.0.0
+wheel==0.48.0
+ninja==1.13.2

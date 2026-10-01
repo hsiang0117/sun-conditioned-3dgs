@@ -2,7 +2,47 @@
 
 This independent research repository preserves the main-branch history of [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) via the validated [local baseline fork](https://github.com/hsiang0117/gaussian-splatting), starting at `82c24968dda8933575019189eec5fcd568d638a8`. The existing upstream license and attribution remain in effect.
 
-Current status: repository preparation and design only; sun conditioning is not implemented yet. See [the implementation plan](SUN_CONDITIONED_PLAN.md) for the proposed conditional SH model, data split, integration points, and validation steps.
+Sun conditioning is implemented in Python using the existing rasterizer's `colors_precomp` input. Geometry and opacity are shared across lights; a 16-dimensional feature per Gaussian and a shared two-layer, width-32 MLP generate sun-dependent residuals for the view SH coefficients. The sun input is continuous degree-2 SH of the world-space direction toward the sun. CUDA kernel sources are unchanged.
+
+The training loss is the original L1 + DSSIM. LPIPS is used only for evaluation. See [the model and experiment notes](SUN_CONDITIONED_PLAN.md) and [local Windows setup](WINDOWS_SETUP.md).
+
+## Train and evaluate this baseline
+
+Use a dedicated environment. The dataset must include `sun_direction` in every train/test frame; `camera_index` and `time_index` are preserved as metadata. Directions must already use the dataset's OpenGL world convention, with +Y up. `--eval` is required to preserve the supplied test split.
+
+```powershell
+# Full experiment, at the original image resolution. Default: 30,000 steps.
+.\.venv\Scripts\python.exe train.py -s D:\dataset\CloudDatasetUniform --eval --resolution 1 --data_device cpu --disable_viewer
+
+# Replace the model path with the timestamp printed by train.py.
+.\.venv\Scripts\python.exe render.py -m output\YYYYMMDD_HHMMSS --skip_train
+.\.venv\Scripts\python.exe metrics.py -m output\YYYYMMDD_HHMMSS
+.\.venv\Scripts\python.exe tools\eval_test_groups.py output\YYYYMMDD_HHMMSS
+```
+
+Output defaults to `output/YYYYMMDD_HHMMSS`. A fixed training camera and sun are used for `rendertest/iteration_XXXXXX.png` every 1,000 steps and at the end. The run also records `training_config.json`, `training_stats.jsonl`, and `training_summary.json`. `render.py` writes a manifest mapping each rendered filename back to its camera, source image, and sun. Grouped metrics distinguish held-out sun directions from seen suns at held-out camera/sun combinations. These are full-image metrics; cloud-region evaluation continues to use the existing shared VDB-mask protocol.
+
+Add `--disable_sun_conditioning` for the original-3DGS control, with identical resolution, initialization, seed, split, and optimization settings. There is no per-image exposure fitting by default. The upstream live viewer uses the fixed preview sun; it has no interactive sun controls.
+
+Conditional models consist of **both** `point_cloud.ply` and `sun_conditioning.pt` in each iteration directory. The sidecar contains per-Gaussian features, decoder weights, active SH degree, and a PLY hash that protects their point ordering. A training checkpoint also restores both optimizers. For example, save one with `--checkpoint_iterations 10000`, then resume with `--start_checkpoint output\<run>\chkpnt10000.pth` and the same data/configuration.
+
+For a conventional PLY viewer, bake one sun direction:
+
+```powershell
+.\.venv\Scripts\python.exe tools\export_sun_ply.py -m output\YYYYMMDD_HHMMSS --sun_direction 0 1 0 --output output\YYYYMMDD_HHMMSS\exports\zenith.ply
+```
+
+The exported PLY works as a standard 3DGS model for that fixed sun. To change lighting, export another direction or render through the conditional Python model. Loading the unbaked PLY in a standard viewer shows only its base SH, not the complete conditional appearance.
+
+## Verification
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_sun_conditioning.py -v
+```
+
+Checks cover zero-residual image and geometry-gradient agreement with native SH rendering, continuous-sun response and network gradients, feature/Adam-state inheritance after clone/split/prune, PLY and checkpoint round trips, fixed-sun export, repeated source-image stems, and evaluation grouping integrity.
+
+Local verification on 2026-10-02 passed all 9 tests and completed 1,000-step Uniform runs for both conditional and disabled controls at 256×256, plus checkpoint resume, all 152 test-frame renders, metric grouping, and fixed-sun CLI export. At 200k points, early steps averaged 40.98 ms versus 17.85 ms for the control in this single local check. Full-resolution 30k training has not been run; see [the measured validation notes](SUN_CONDITIONED_PLAN.md#2026-10-02-实测验证) before interpreting this short-run overhead.
 
 The original project README follows.
 

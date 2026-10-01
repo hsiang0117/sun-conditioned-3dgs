@@ -51,11 +51,16 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self._depths = ""
-        self._resolution = -1
+        self._resolution = 1
         self._white_background = False
         self.train_test_exp = False
-        self.data_device = "cuda"
+        self.data_device = "cpu"
         self.eval = False
+        self.disable_sun_conditioning = False
+        self.sun_feature_dim = 16
+        self.sun_hidden_dim = 32
+        self.sun_sh_degree = 2
+        self.seed = 0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -79,6 +84,8 @@ class OptimizationParams(ParamGroup):
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
+        self.sun_feature_lr = 0.0025
+        self.sun_network_lr = 0.001
         self.opacity_lr = 0.025
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001

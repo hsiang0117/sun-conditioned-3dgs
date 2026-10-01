@@ -15,12 +15,15 @@ from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotati
 from torch import nn
 import os
 import json
+import hashlib
+from pathlib import Path
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from scene.sun_conditioning import SunSHDecoder
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -47,7 +50,8 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, sh_degree, optimizer_type="default", sun_conditioning=True,
+                 sun_feature_dim=16, sun_hidden_dim=32, sun_sh_degree=2):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -63,10 +67,85 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.sun_conditioning = sun_conditioning
+        self.sun_feature_dim = sun_feature_dim
+        self.sun_hidden_dim = sun_hidden_dim
+        self.sun_sh_degree = sun_sh_degree
+        self._sun_features = torch.empty(0)
+        self.sun_decoder = None
+        self.sun_optimizer = None
+        self._exposure = nn.Parameter(torch.empty((0, 3, 4), device="cuda"))
+        self.exposure_mapping = {}
+        self.pretrained_exposures = None
         self.setup_functions()
 
+    @classmethod
+    def from_args(cls, args, optimizer_type="default"):
+        return cls(args.sh_degree, optimizer_type,
+                   not getattr(args, "disable_sun_conditioning", False),
+                   getattr(args, "sun_feature_dim", 16),
+                   getattr(args, "sun_hidden_dim", 32),
+                   getattr(args, "sun_sh_degree", 2))
+
+    def _initialize_sun_parameters(self):
+        if not self.sun_conditioning:
+            self.sun_decoder = None
+            return
+        self.sun_decoder = SunSHDecoder(
+            self.sun_feature_dim, self.sun_hidden_dim, self.sun_sh_degree,
+            self.max_sh_degree).to(self._xyz.device)
+        self._sun_features = nn.Parameter(
+            torch.randn((self._xyz.shape[0], self.sun_feature_dim),
+                        device=self._xyz.device) * 0.01)
+
+    def conditioned_features(self, sun_direction):
+        if not self.sun_conditioning:
+            return self.get_features
+        if self.sun_decoder is None:
+            raise RuntimeError("Sun decoder has not been initialized or loaded")
+        if sun_direction is None:
+            raise ValueError("Sun-conditioned rendering requires sun_direction")
+        direction = torch.as_tensor(sun_direction, dtype=self._xyz.dtype,
+                                    device=self._xyz.device)
+        return self.get_features + self.sun_decoder(self._sun_features, direction)
+
+    def _sun_state(self):
+        if not self.sun_conditioning:
+            return None
+        return {
+            "feature_dim": self.sun_feature_dim,
+            "hidden_dim": self.sun_hidden_dim,
+            "sun_sh_degree": self.sun_sh_degree,
+            "view_sh_degree": self.max_sh_degree,
+            "features": self._sun_features.detach().cpu(),
+            "decoder": {k: v.detach().cpu() for k, v in self.sun_decoder.state_dict().items()},
+            "active_sh_degree": self.active_sh_degree,
+        }
+
+    def _restore_sun_state(self, state):
+        self.sun_conditioning = state is not None
+        self.sun_optimizer = None
+        if state is None:
+            self.sun_decoder = None
+            self._sun_features = torch.empty(0)
+            return
+        if state["view_sh_degree"] != self.max_sh_degree:
+            raise ValueError("Model SH degree differs from sun-conditioning state")
+        self.sun_feature_dim = state["feature_dim"]
+        self.sun_hidden_dim = state["hidden_dim"]
+        self.sun_sh_degree = state["sun_sh_degree"]
+        features = state["features"]
+        if features.shape != (self._xyz.shape[0], self.sun_feature_dim):
+            raise ValueError("Sun features and PLY Gaussian count do not match")
+        self.sun_decoder = SunSHDecoder(
+            self.sun_feature_dim, self.sun_hidden_dim, self.sun_sh_degree,
+            self.max_sh_degree).to(self._xyz.device)
+        self.sun_decoder.load_state_dict(state["decoder"])
+        self._sun_features = nn.Parameter(features.to(self._xyz.device).clone())
+        self.active_sh_degree = state["active_sh_degree"]
+
     def capture(self):
-        return (
+        base = (
             self.active_sh_degree,
             self._xyz,
             self._features_dc,
@@ -80,8 +159,19 @@ class GaussianModel:
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
+        return {
+            "gaussians": base, "sun": self._sun_state(),
+            "sun_optimizer": self.sun_optimizer.state_dict() if self.sun_optimizer else None,
+            "exposure": self._exposure,
+            "exposure_mapping": self.exposure_mapping,
+            "pretrained_exposures": self.pretrained_exposures,
+            "exposure_optimizer": self.exposure_optimizer.state_dict(),
+        }
     
     def restore(self, model_args, training_args):
+        checkpoint = model_args if isinstance(model_args, dict) else None
+        if checkpoint is not None:
+            model_args = checkpoint["gaussians"]
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -94,10 +184,19 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
+        self._restore_sun_state(checkpoint["sun"] if checkpoint else None)
+        if checkpoint is not None:
+            self._exposure = nn.Parameter(checkpoint["exposure"].to(self._xyz.device).detach().clone())
+            self.exposure_mapping = checkpoint["exposure_mapping"]
+            self.pretrained_exposures = checkpoint["pretrained_exposures"]
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+        if checkpoint is not None:
+            self.exposure_optimizer.load_state_dict(checkpoint["exposure_optimizer"])
+            if self.sun_conditioning:
+                self.sun_optimizer.load_state_dict(checkpoint["sun_optimizer"])
 
     @property
     def get_scaling(self):
@@ -174,8 +273,11 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        self._initialize_sun_parameters()
 
     def training_setup(self, training_args):
+        if self.sun_conditioning and self.optimizer_type != "default":
+            raise ValueError("Sun features use dense Adam; select --optimizer_type default")
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -188,6 +290,13 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
+        if self.sun_conditioning:
+            l.append({'params': [self._sun_features], 'lr': training_args.sun_feature_lr,
+                      "name": "sun_features"})
+            self.sun_optimizer = torch.optim.Adam(self.sun_decoder.parameters(),
+                                                  lr=training_args.sun_network_lr)
+        else:
+            self.sun_optimizer = None
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -236,13 +345,17 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
+    def save_ply(self, path, sun_direction=None):
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        features = self.get_features
+        if sun_direction is not None:
+            features = self.conditioned_features(sun_direction).detach().clone()
+            features[:, (self.active_sh_degree + 1) ** 2:, :] = 0
+        f_dc = features[:, :1].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = features[:, 1:].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -253,7 +366,14 @@ class GaussianModel:
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(path)
+        conditional = self.sun_conditioning and sun_direction is None
+        comments = ["sun_conditioned_3dgs: requires sun_conditioning.pt"] if conditional else []
+        PlyData([el], comments=comments).write(path)
+        if conditional:
+            state = self._sun_state()
+            with open(path, "rb") as stream:
+                state["ply_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+            torch.save(state, Path(path).with_name("sun_conditioning.pt"))
 
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
@@ -312,6 +432,19 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+        self.max_radii2D = torch.zeros(self._xyz.shape[0], device=self._xyz.device)
+        conditional = any(c.startswith("sun_conditioned_3dgs:") for c in plydata.comments)
+        state = None
+        if conditional:
+            sidecar = Path(path).with_name("sun_conditioning.pt")
+            if not sidecar.is_file():
+                raise FileNotFoundError(f"Conditional PLY requires {sidecar}")
+            state = torch.load(sidecar, map_location="cpu", weights_only=True)
+            with open(path, "rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if state["ply_sha256"] != digest:
+                raise ValueError("Sun-conditioning state does not belong to this PLY")
+        self._restore_sun_state(state)
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -356,6 +489,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        if self.sun_conditioning:
+            self._sun_features = optimizable_tensors["sun_features"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -385,13 +520,17 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_sun_features=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
+        if self.sun_conditioning:
+            if new_sun_features is None:
+                raise ValueError("Densification must inherit the parent's sun features")
+            d["sun_features"] = new_sun_features
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -400,6 +539,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        if self.sun_conditioning:
+            self._sun_features = optimizable_tensors["sun_features"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -427,7 +568,9 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        new_sun = self._sun_features[selected_pts_mask].repeat(N, 1) if self.sun_conditioning else None
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity,
+                                  new_scaling, new_rotation, new_tmp_radii, new_sun)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -447,7 +590,9 @@ class GaussianModel:
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        new_sun = self._sun_features[selected_pts_mask] if self.sun_conditioning else None
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities,
+                                  new_scaling, new_rotation, new_tmp_radii, new_sun)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
