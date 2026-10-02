@@ -1,4 +1,4 @@
-# Match the validated original-3DGS Windows environment.
+# Shared Python 3.12 / PyTorch CUDA 12.8 runtime pins for Windows and Linux.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
 torchvision==0.26.0+cu128

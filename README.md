@@ -4,7 +4,7 @@ This independent research repository preserves the main-branch history of [graph
 
 Sun conditioning is implemented in Python using the existing rasterizer's `colors_precomp` input. Geometry and opacity are shared across lights; a 16-dimensional feature per Gaussian and a shared two-layer, width-32 MLP generate sun-dependent residuals for the view SH coefficients. The sun input is continuous degree-2 SH of the world-space direction toward the sun. CUDA kernel sources are unchanged.
 
-The training loss is the original L1 + DSSIM. LPIPS is used only for evaluation. See [the model and experiment notes](SUN_CONDITIONED_PLAN.md) and [local Windows setup](WINDOWS_SETUP.md).
+The training loss is the original L1 + DSSIM. LPIPS is used only for evaluation. See [the model and experiment notes](SUN_CONDITIONED_PLAN.md), [local Windows setup](WINDOWS_SETUP.md), and [Linux/server setup](LINUX_SETUP.md).
 
 ## Train and evaluate this baseline
 
@@ -12,7 +12,7 @@ Use a dedicated environment. The dataset must include `sun_direction` in every t
 
 ```powershell
 # Full experiment, at the original image resolution. Default: 30,000 steps.
-.\.venv\Scripts\python.exe train.py -s D:\dataset\CloudDatasetUniform --eval --resolution 1 --data_device cpu --disable_viewer
+.\.venv\Scripts\python.exe train.py -s D:\dataset\CloudDatasetUniform_envon --eval --resolution 1 --data_device cpu --disable_viewer
 
 # Replace the model path with the timestamp printed by train.py.
 .\.venv\Scripts\python.exe render.py -m output\YYYYMMDD_HHMMSS --skip_train
@@ -21,6 +21,8 @@ Use a dedicated environment. The dataset must include `sun_direction` in every t
 ```
 
 Output defaults to `output/YYYYMMDD_HHMMSS`. A fixed training camera and sun are used for `rendertest/iteration_XXXXXX.png` every 1,000 steps and at the end. The run also records `training_config.json`, `training_stats.jsonl`, and `training_summary.json`. `render.py` writes a manifest mapping each rendered filename back to its camera, source image, and sun. Grouped metrics distinguish held-out sun directions from seen suns at held-out camera/sun combinations. These are full-image metrics; cloud-region evaluation continues to use the existing shared VDB-mask protocol.
+
+The main full-lighting relighting comparison uses `CloudDatasetUniform_envon`, matching the GT used by Cloud-GS after its second stage. The earlier env-off short runs validate implementation and overhead; pure-sun experiments can still use `CloudDatasetUniform` as a separate setting. This method trains directly on env-on without Cloud-GS's two-stage decomposition.
 
 Add `--disable_sun_conditioning` for the original-3DGS control, with identical resolution, initialization, seed, split, and optimization settings. There is no per-image exposure fitting by default. The upstream live viewer uses the fixed preview sun; it has no interactive sun controls.
 
