@@ -37,18 +37,21 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
     manifest = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
-        gt = view.original_image[0:3, :, :]
+        try:
+            rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
+            gt = view.original_image[0:3, :, :]
 
-        if train_test_exp:
-            rendering = rendering[..., rendering.shape[-1] // 2:]
-            gt = gt[..., gt.shape[-1] // 2:]
+            if train_test_exp:
+                rendering = rendering[..., rendering.shape[-1] // 2:]
+                gt = gt[..., gt.shape[-1] // 2:]
 
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        manifest.append({"image": f"{idx:05d}.png", "file_path": view.image_name,
-                         "camera_index": view.camera_index, "time_index": view.time_index,
-                         "sun_direction": view.v_l.cpu().tolist() if view.v_l is not None else None})
+            torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+            manifest.append({"image": f"{idx:05d}.png", "file_path": view.image_name,
+                             "camera_index": view.camera_index, "time_index": view.time_index,
+                             "sun_direction": view.v_l.cpu().tolist() if view.v_l is not None else None})
+        finally:
+            view.release_loaded()
     with open(os.path.join(os.path.dirname(render_path), "manifest.json"), "w") as stream:
         json.dump(manifest, stream, indent=2)
 

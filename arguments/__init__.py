@@ -55,6 +55,7 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.train_test_exp = False
         self.data_device = "cpu"
+        self.image_cache_max = 0
         self.eval = False
         self.disable_sun_conditioning = False
         self.sun_feature_dim = 16

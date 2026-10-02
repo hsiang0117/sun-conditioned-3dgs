@@ -28,6 +28,14 @@ Add `--disable_sun_conditioning` for the original-3DGS control, with identical r
 
 Conditional models consist of **both** `point_cloud.ply` and `sun_conditioning.pt` in each iteration directory. The sidecar contains per-Gaussian features, decoder weights, active SH degree, and a PLY hash that protects their point ordering. A training checkpoint also restores both optimizers. For example, save one with `--checkpoint_iterations 10000`, then resume with `--start_checkpoint output\<run>\chkpnt10000.pth` and the same data/configuration.
 
+### Image loading and memory
+
+Dataset cameras load only image headers and poses at startup. RGB and alpha pixels are decoded on demand into a shared CPU cache (uint8 for 8-bit PNGs), using the original PIL resize and CPU normalization. Float buffers are released after use in training, evaluation and rendering. Training prefetches two frames on a background thread with a dedicated CUDA upload stream; queue saturation does not discard samples. Sun metadata, alpha/exposure masking and loss functions are unchanged.
+
+`--data_device cpu` remains the default. `--image_cache_max 0` caches all decoded frames; set a positive count, such as `--image_cache_max 256`, to bound the CPU cache with LRU eviction. For 1,460 full-resolution 1024×1024 RGBA frames, the pixel payload is about 5.70 GiB instead of the previous 39.92 GiB of persistent RGB/alpha floats. This excludes model, active-frame and process overhead. Linux training statistics record process RSS, container memory and decoded-cache payload every 1,000 steps. Use the container's cgroup limit rather than host `free` output when sizing an experiment.
+
+Existing model/checkpoint formats remain compatible. Resuming restores model and optimizer state; the original checkpoints do not save the random sampler/RNG state, so a resumed trajectory is not bit-identical to uninterrupted training.
+
 For a conventional PLY viewer, bake one sun direction:
 
 ```powershell
@@ -39,10 +47,12 @@ The exported PLY works as a standard 3DGS model for that fixed sun. To change li
 ## Verification
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_sun_conditioning.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 Checks cover zero-residual image and geometry-gradient agreement with native SH rendering, continuous-sun response and network gradients, feature/Adam-state inheritance after clone/split/prune, PLY and checkpoint round trips, fixed-sun export, repeated source-image stems, and evaluation grouping integrity.
+
+Image-loading checks additionally cover exact PIL/alpha/GT agreement, cache reuse and limits, loss/gradient agreement after CUDA prefetch, queue saturation, producer errors and cleanup.
 
 Local verification on 2026-10-02 passed all 9 tests and completed 1,000-step Uniform runs for both conditional and disabled controls at 256×256, plus checkpoint resume, all 152 test-frame renders, metric grouping, and fixed-sun CLI export. At 200k points, early steps averaged 40.98 ms versus 17.85 ms for the control in this single local check. Full-resolution 30k training has not been run; see [the measured validation notes](SUN_CONDITIONED_PLAN.md#2026-10-02-实测验证) before interpreting this short-run overhead.
 

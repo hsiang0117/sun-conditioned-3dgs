@@ -14,6 +14,9 @@ import numpy as np
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
+import os
+import torch
+from concurrent.futures import ThreadPoolExecutor
 
 WARNED = False
 
@@ -21,7 +24,9 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
     if not getattr(args, "disable_sun_conditioning", False) and cam_info.sun_direction is None:
         raise ValueError(f"Missing sun_direction in {cam_info.image_path}; "
                          "use --disable_sun_conditioning for an original-3DGS control")
-    image = Image.open(cam_info.image_path)
+    # Read dimensions without decoding image pixels during Scene construction.
+    with Image.open(cam_info.image_path) as image:
+        orig_w, orig_h = image.size
 
     if cam_info.depth_path != "":
         try:
@@ -42,7 +47,6 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
     else:
         invdepthmap = None
         
-    orig_w, orig_h = image.size
     if args.resolution in [1, 2, 4, 8]:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
     else:  # should be a type that converts to float
@@ -65,19 +69,22 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
-                  image=image, invdepthmap=invdepthmap,
+                  image=None, image_path=cam_info.image_path, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
                   train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test,
                   sun_direction=cam_info.sun_direction, camera_index=cam_info.camera_index,
-                  time_index=cam_info.time_index)
+                  time_index=cam_info.time_index,
+                  image_cache_max=getattr(args, "image_cache_max", 0) or 0)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
-    camera_list = []
-
-    for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset))
-
-    return camera_list
+    # Initialize PyTorch's lazy CUDA inverse wrapper before concurrent cameras.
+    if torch.cuda.is_available():
+        torch.eye(4, device="cuda").inverse()
+    def load(item):
+        id, info = item
+        return loadCam(args, id, info, resolution_scale, is_nerf_synthetic, is_test_dataset)
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as pool:
+        return list(pool.map(load, enumerate(cam_infos)))
 
 def camera_to_JSON(id, camera : Camera):
     Rt = np.zeros((4, 4))
