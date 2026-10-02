@@ -54,7 +54,9 @@ Checks cover zero-residual image and geometry-gradient agreement with native SH 
 
 Image-loading checks additionally cover exact PIL/alpha/GT agreement, cache reuse and limits, loss/gradient agreement after CUDA prefetch, queue saturation, producer errors and cleanup.
 
-Local verification on 2026-10-02 passed all 9 tests and completed 1,000-step Uniform runs for both conditional and disabled controls at 256×256, plus checkpoint resume, all 152 test-frame renders, metric grouping, and fixed-sun CLI export. At 200k points, early steps averaged 40.98 ms versus 17.85 ms for the control in this single local check. Full-resolution 30k training has not been run; see [the measured validation notes](SUN_CONDITIONED_PLAN.md#2026-10-02-实测验证) before interpreting this short-run overhead.
+Local verification on 2026-10-02 passed all 9 tests and completed 1,000-step Uniform runs for both conditional and disabled controls at 256×256, plus checkpoint resume, all 152 test-frame renders, metric grouping, and fixed-sun CLI export. At 200k points, early steps averaged 40.98 ms versus 17.85 ms for the control in this single local check. See [the measured validation notes](SUN_CONDITIONED_PLAN.md#2026-10-02-实测验证) before interpreting this short-run overhead.
+
+After migrating image loading, all 17 tests passed on Windows and Linux. The server env-on run `output/20261002_104519` completed at 30,000 steps and evaluated all 152 test frames at 1024×1024. It resumed from the 20,000-step checkpoint after the previous process was killed by the container memory limit. The remaining 10,000 steps, including previews and final training-time evaluation, took 265.21 seconds; process peak RSS was 8.25 GiB. Full-image test metrics were PSNR 31.9052 dB, SSIM 0.97265 and LPIPS 0.05840. `recovery/attempt_1` preserves the failed attempt's logs, and `grouped_results.json` records the 96 held-out-sun and 56 seen-sun/new-combination results. These timings cover the resumed segment only.
 
 The original project README follows.
 
